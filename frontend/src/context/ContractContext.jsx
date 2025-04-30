@@ -1,5 +1,6 @@
-import React, { createContext, useState, useContext, useEffect, useCallback } from 'react';
+import React, { createContext, useState, useContext, useEffect, useCallback, useRef } from 'react';
 import api from '../services/api';
+import sharePointService from '../services/sharepoint';
 
 const ContractContext = createContext(null);
 
@@ -13,6 +14,30 @@ export const ContractProvider = ({ children }) => {
     dateFrom: '',
     dateTo: ''
   });
+  const [syncStatus, setSyncStatus] = useState({
+    syncing: false,
+    lastSync: null,
+    message: null
+  });
+  
+  // Referencia para evitar sincronizaciones múltiples
+  const syncInProgress = useRef(false);
+  // Referencia para evitar la sincronización automática al iniciar
+  const initialSyncDone = useRef(false);
+  // ID de timeout para uso con debounce
+  const syncTimeoutRef = useRef(null);
+
+  // Función debounce para evitar múltiples sincronizaciones en poco tiempo
+  const debouncedSync = useCallback((fn, delay = 1000) => {
+    if (syncTimeoutRef.current) {
+      clearTimeout(syncTimeoutRef.current);
+    }
+    
+    syncTimeoutRef.current = setTimeout(() => {
+      fn();
+      syncTimeoutRef.current = null;
+    }, delay);
+  }, []);
 
   const fetchContracts = useCallback(async () => {
     try {
@@ -147,32 +172,128 @@ export const ContractProvider = ({ children }) => {
     }
   }, []);
 
+  // Función para sincronizar desde SharePoint - controlada para evitar ejecuciones simultáneas
+  const syncFromSharePoint = useCallback(async () => {
+    // Si ya hay una sincronización en progreso, no iniciar otra
+    if (syncInProgress.current) {
+      console.log("Sincronización ya en progreso, ignorando solicitud");
+      return { message: "Ya hay una sincronización en progreso" };
+    }
+    
+    try {
+      syncInProgress.current = true;
+      setError(null);
+      setSyncStatus(prev => ({ 
+        ...prev, 
+        syncing: true, 
+        message: 'Sincronizando desde SharePoint...' 
+      }));
+      
+      const response = await sharePointService.syncFromSharePoint();
+      
+      // Marcar que la sincronización inicial se ha completado
+      initialSyncDone.current = true;
+      
+      // Recargar contratos después de sincronizar
+      await fetchContracts();
+      
+      setSyncStatus({
+        syncing: false,
+        lastSync: new Date(),
+        message: `Sincronización desde SharePoint exitosa: ${response.message || ''}`
+      });
+      
+      return response;
+    } catch (err) {
+      const errorMsg = err.response?.data?.detail || 'Error al sincronizar desde SharePoint';
+      setSyncStatus({
+        syncing: false,
+        lastSync: new Date(),
+        message: `Error: ${errorMsg}`
+      });
+      setError(errorMsg);
+      return null;
+    } finally {
+      syncInProgress.current = false;
+    }
+  }, [fetchContracts]);
+
+  // Función para sincronizar hacia SharePoint - controlada para evitar ejecuciones simultáneas
+  const syncToSharePoint = useCallback(async () => {
+    // Si ya hay una sincronización en progreso, no iniciar otra
+    if (syncInProgress.current) {
+      console.log("Sincronización ya en progreso, ignorando solicitud");
+      return { message: "Ya hay una sincronización en progreso" };
+    }
+    
+    try {
+      syncInProgress.current = true;
+      setError(null);
+      setSyncStatus(prev => ({ 
+        ...prev, 
+        syncing: true, 
+        message: 'Sincronizando hacia SharePoint...' 
+      }));
+      
+      // Aplicar debounce - espera un poco antes de sincronizar para asegurar
+      // que no hay múltiples operaciones de sincronización seguidas
+      await new Promise(resolve => setTimeout(resolve, 800));
+      
+      const response = await sharePointService.syncToSharePoint();
+      
+      setSyncStatus({
+        syncing: false,
+        lastSync: new Date(),
+        message: `Sincronización hacia SharePoint exitosa: ${response.message || ''}`
+      });
+      
+      // Hacer que el mensaje de éxito desaparezca después de 5 segundos
+      setTimeout(() => {
+        setSyncStatus(prev => ({
+          ...prev,
+          message: null
+        }));
+      }, 5000);
+      
+      return response;
+    } catch (err) {
+      const errorMsg = err.response?.data?.detail || 'Error al sincronizar hacia SharePoint';
+      setSyncStatus({
+        syncing: false,
+        lastSync: new Date(),
+        message: `Error: ${errorMsg}`
+      });
+      setError(errorMsg);
+      return null;
+    } finally {
+      syncInProgress.current = false;
+    }
+  }, []);
+
   // Filtrar contratos según criterios de búsqueda
-  const filteredContracts = useCallback(() => {
-    return contracts.filter(contract => {
-      const matchSearch = filter.search 
-        ? (
-            contract.contract_number?.toLowerCase().includes(filter.search.toLowerCase()) ||
-            contract.description?.toLowerCase().includes(filter.search.toLowerCase()) ||
-            contract.supplier?.toLowerCase().includes(filter.search.toLowerCase())
-          )
-        : true;
-      
-      const matchStatus = filter.status 
-        ? contract.status === filter.status 
-        : true;
-      
-      const matchDateFrom = filter.dateFrom 
-        ? new Date(contract.start_date) >= new Date(filter.dateFrom) 
-        : true;
-      
-      const matchDateTo = filter.dateTo 
-        ? new Date(contract.end_date) <= new Date(filter.dateTo) 
-        : true;
-      
-      return matchSearch && matchStatus && matchDateFrom && matchDateTo;
-    });
-  }, [contracts, filter]);
+  const filteredContracts = contracts.filter(contract => {
+    const matchSearch = filter.search 
+      ? (
+          contract.contract_number?.toLowerCase().includes(filter.search.toLowerCase()) ||
+          contract.description?.toLowerCase().includes(filter.search.toLowerCase()) ||
+          contract.supplier?.toLowerCase().includes(filter.search.toLowerCase())
+        )
+      : true;
+    
+    const matchStatus = filter.status 
+      ? contract.status === filter.status 
+      : true;
+    
+    const matchDateFrom = filter.dateFrom 
+      ? new Date(contract.start_date) >= new Date(filter.dateFrom) 
+      : true;
+    
+    const matchDateTo = filter.dateTo 
+      ? new Date(contract.end_date) <= new Date(filter.dateTo) 
+      : true;
+    
+    return matchSearch && matchStatus && matchDateFrom && matchDateTo;
+  });
 
   // Cargar contratos al iniciar
   useEffect(() => {
@@ -181,18 +302,23 @@ export const ContractProvider = ({ children }) => {
 
   const value = {
     contracts,
-    filteredContracts: filteredContracts(),
+    filteredContracts,
     loading,
     error,
     filter,
     setFilter,
+    syncStatus,
     fetchContracts,
     getContract,
     createContract,
     updateContract,
     deleteContract,
     importFromExcel,
-    exportToExcel
+    exportToExcel,
+    syncFromSharePoint,
+    syncToSharePoint,
+    // Exponer para verificación externa
+    isInitialSyncDone: () => initialSyncDone.current
   };
 
   return (

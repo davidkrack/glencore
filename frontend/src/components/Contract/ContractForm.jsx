@@ -1,5 +1,57 @@
 import React, { useState, useEffect } from 'react';
 import { useContract } from '../../context/ContractContext';
+import { useForm } from 'react-hook-form';
+import { yupResolver } from '@hookform/resolvers/yup';
+import * as yup from 'yup';
+
+// Esquema de validación usando Yup
+const contractSchema = yup.object().shape({
+  contract_number: yup.string()
+    .required('El número de contrato es obligatorio'),
+  description: yup.string()
+    .required('La descripción es obligatoria'),
+  supplier: yup.string()
+    .required('El proveedor es obligatorio'),
+  status: yup.string()
+    .required('El estado es obligatorio'),
+  start_date: yup.string()
+    .required('La fecha de inicio es obligatoria'),
+  end_date: yup.string()
+    .required('La fecha de fin es obligatoria')
+    .test('is-after-start', 'La fecha de fin debe ser posterior a la fecha de inicio', 
+      function(value) {
+        const { start_date } = this.parent;
+        if (!start_date || !value) return true;
+        return new Date(value) > new Date(start_date);
+      }),
+  currency: yup.string()
+    .required('La moneda es requerida'),
+  total_amount: yup.number()
+    .typeError('El monto debe ser un número')
+    .required('El monto total es requerido')
+    .min(0, 'El monto debe ser positivo'),
+  remaining_amount: yup.number()
+    .typeError('El monto debe ser un número')
+    .required('El monto restante es requerido')
+    .min(0, 'El monto restante no puede ser negativo')
+    .test('is-less-than-total', 'El monto restante no puede ser mayor al monto total',
+      function(value) {
+        const { total_amount } = this.parent;
+        if (!total_amount || !value) return true;
+        return value <= total_amount;
+      }),
+  // Validación condicional para CAPEX - versión compatible
+  cmf_code: yup.string()
+    .test('cmf-required-for-capex', 'El código CMF es obligatorio para contratos CAPEX', 
+      function(value) {
+        const { opex_capex } = this.parent;
+        // Solo validar si es CAPEX
+        if (opex_capex === 'CAPEX') {
+          return !!value; // Debe tener un valor
+        }
+        return true; // No es obligatorio para OPEX
+      })
+});
 
 const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
   const { createContract, updateContract } = useContract();
@@ -7,75 +59,27 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
   const [formError, setFormError] = useState(null);
   const [activeTab, setActiveTab] = useState('basic'); // Para navegación por pestañas
   
-  // Estado para controlar campos relacionados (validaciones contextuales)
-  const [showCMFField, setShowCMFField] = useState(false);
-  
-  // Inicializar el formulario con valores por defecto o del contrato existente
-  const [formData, setFormData] = useState({
-    // Campos básicos originales
-    contract_number: '',
-    description: '',
-    supplier: '',
-    status: 'Active',
-    start_date: '',
-    end_date: '',
-    currency: 'USD',
-    total_amount: 0,
-    remaining_amount: 0,
-    
-    // Campos SAP (A-J) - Solo visualización, no editables
-    sap_contract_number: '',
-    sap_description: '',
-    sap_supplier: '',
-    sap_start_date: '',
-    sap_end_date: '',
-    sap_currency: '',
-    sap_total_amount: 0,
-    sap_remaining_amount: 0,
-    sap_department: '',
-    sap_category: '',
-    
-    // Datos analistas (K-S)
-    good_service: '',
-    site: '',
-    process_name: '',
-    supply_area_name: '',
-    contract_type: 'Recurrente', // Recurrente / Spot
-    opex_capex: 'OPEX',
-    contract_analyst: '',
-    user_management: '',
-    category_n1_n2: '',
-    
-    // Campos U-Y
-    contracting_type: '',
-    budget_usd: 0,
-    cmf_code: '',
-    planned_process_start_date: '',
-    contract_signed_end_date: '',
-    
-    // Campos AA-AU - Fechas de hitos
-    solped_budget_approved_date: '',
-    strategy_committee_date: '',
-    market_release_date: '',
-    queries_date: '',
-    offers_reception_date: '',
-    technical_evaluation_date: '',
-    economic_evaluation_date: '',
-    negotiation_date: '',
-    sc_committee_date: '',
-    site_committee_date: '',
-    regional_committee_date: '',
-    global_committee_date: '',
-    contract_signed_date: '',
-    kickoff_date: '',
-    current_status: '',
-    comment: '',
-    real_award_date: '',
-    tender_code: '',
-    awarded_amount: 0,
-    sap_contract_number_new: '',
-    new_contract_term_months: 0,
+  // Usar react-hook-form con validación yup
+  const { register, handleSubmit, setValue, watch, reset, formState: { errors } } = useForm({
+    resolver: yupResolver(contractSchema),
+    defaultValues: {
+      contract_number: '',
+      description: '',
+      supplier: '',
+      status: 'Active',
+      start_date: '',
+      end_date: '',
+      currency: 'USD',
+      total_amount: 0,
+      remaining_amount: 0,
+      opex_capex: 'OPEX',
+      cmf_code: '',
+    }
   });
+  
+  // Observar campos para lógica condicional
+  const opexCapex = watch('opex_capex');
+  const showCMFField = opexCapex === 'CAPEX';
 
   // Cargar datos del contrato si estamos en modo edición
   useEffect(() => {
@@ -87,8 +91,8 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
         return date.toISOString().split('T')[0];
       };
 
-      // Preparar objeto con valores formateados
-      const initialData = {
+      // Preparar valores para el formulario
+      const formValues = {
         // Campos básicos
         contract_number: contract.contract_number || '',
         description: contract.description || '',
@@ -130,7 +134,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
         planned_process_start_date: formatDateForInput(contract.planned_process_start_date),
         contract_signed_end_date: formatDateForInput(contract.contract_signed_end_date),
         
-        // Campos AA-AU
+        // Hitos
         solped_budget_approved_date: formatDateForInput(contract.solped_budget_approved_date),
         strategy_committee_date: formatDateForInput(contract.strategy_committee_date),
         market_release_date: formatDateForInput(contract.market_release_date),
@@ -154,108 +158,24 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
         new_contract_term_months: contract.new_contract_term_months || 0,
       };
 
-      setFormData(initialData);
-      
-      // Inicializar validaciones condicionales
-      setShowCMFField(contract.opex_capex === 'CAPEX');
+      // Aplicar valores al formulario
+      Object.entries(formValues).forEach(([name, value]) => {
+        setValue(name, value);
+      });
     }
-  }, [contract, mode]);
-
-  // Manejar cambios en el formulario
-  const handleChange = (e) => {
-    const { name, value, type } = e.target;
-    
-    // Convertir a número si el campo es numérico
-    if (type === 'number') {
-      setFormData({ ...formData, [name]: value === '' ? '' : Number(value) });
-    } else {
-      setFormData({ ...formData, [name]: value });
-    }
-    
-    // Lógica para mostrar/ocultar campos según contexto
-    if (name === 'opex_capex') {
-      setShowCMFField(value === 'CAPEX');
-    }
-  };
-
-  // Validar formulario
-  const validateForm = () => {
-    // Validaciones básicas
-    if (!formData.contract_number.trim()) {
-      setFormError('El número de contrato es obligatorio');
-      return false;
-    }
-    if (!formData.description.trim()) {
-      setFormError('La descripción es obligatoria');
-      return false;
-    }
-    if (!formData.supplier.trim()) {
-      setFormError('El proveedor es obligatorio');
-      return false;
-    }
-    if (!formData.start_date) {
-      setFormError('La fecha de inicio es obligatoria');
-      return false;
-    }
-    if (!formData.end_date) {
-      setFormError('La fecha de fin es obligatoria');
-      return false;
-    }
-    
-    // Validar fechas
-    if (new Date(formData.start_date) > new Date(formData.end_date)) {
-      setFormError('La fecha de fin debe ser posterior a la fecha de inicio');
-      return false;
-    }
-    
-    // Validar montos
-    if (formData.total_amount < 0) {
-      setFormError('El monto total no puede ser negativo');
-      return false;
-    }
-    if (formData.remaining_amount < 0) {
-      setFormError('El monto restante no puede ser negativo');
-      return false;
-    }
-    if (formData.remaining_amount > formData.total_amount) {
-      setFormError('El monto restante no puede ser mayor al monto total');
-      return false;
-    }
-    
-    // Validaciones contextuales
-    if (formData.opex_capex === 'CAPEX' && !formData.cmf_code) {
-      setFormError('El código CMF es obligatorio para contratos CAPEX');
-      setActiveTab('additional'); // Cambiar a la pestaña donde está el campo
-      return false;
-    }
-
-    return true;
-  };
+  }, [contract, mode, setValue]);
 
   // Manejar envío del formulario
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const onSubmit = async (data) => {
     setFormError(null);
-    
-    // Validar formulario
-    if (!validateForm()) {
-      return;
-    }
-    
     setLoading(true);
     
     try {
-      // Calcular campos automáticos antes de enviar
-      const dataToSend = {
-        ...formData,
-        // Calcular alertas y porcentajes aquí si es necesario
-      };
-      
-      // Crear o actualizar el contrato según el modo
+      // Ejecutar la acción correspondiente según el modo
       if (mode === 'edit' && contract) {
-        await updateContract(contract.id, dataToSend);
+        await updateContract(contract.id, data);
       } else {
-        await createContract(dataToSend);
+        await createContract(data);
       }
       
       // Cerrar el formulario si todo salió bien
@@ -265,6 +185,23 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Función para renderizar mensajes de error
+  const renderError = (fieldName) => {
+    const error = errors[fieldName];
+    if (!error) return null;
+    
+    // Asegurarse de que el mensaje sea una cadena
+    const errorMessage = typeof error.message === 'string' 
+      ? error.message 
+      : 'Error de validación';
+      
+    return (
+      <p className="mt-1 text-xs text-red-500">
+        {errorMessage}
+      </p>
+    );
   };
 
   return (
@@ -279,6 +216,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
       <div className="border-b border-gray-200 mb-4">
         <nav className="-mb-px flex space-x-4">
           <button
+            type="button"
             onClick={() => setActiveTab('basic')}
             className={`py-2 px-1 border-b-2 font-medium text-sm ${
               activeTab === 'basic'
@@ -289,6 +227,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
             Información Básica
           </button>
           <button
+            type="button"
             onClick={() => setActiveTab('details')}
             className={`py-2 px-1 border-b-2 font-medium text-sm ${
               activeTab === 'details'
@@ -299,6 +238,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
             Detalles del Proceso
           </button>
           <button
+            type="button"
             onClick={() => setActiveTab('milestones')}
             className={`py-2 px-1 border-b-2 font-medium text-sm ${
               activeTab === 'milestones'
@@ -309,6 +249,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
             Hitos y Fechas
           </button>
           <button
+            type="button"
             onClick={() => setActiveTab('additional')}
             className={`py-2 px-1 border-b-2 font-medium text-sm ${
               activeTab === 'additional'
@@ -320,6 +261,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
           </button>
           {contract && (
             <button
+              type="button"
               onClick={() => setActiveTab('sap')}
               className={`py-2 px-1 border-b-2 font-medium text-sm ${
                 activeTab === 'sap'
@@ -333,7 +275,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
         </nav>
       </div>
       
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
         {/* Pestaña: Información Básica */}
         {activeTab === 'basic' && (
           <div className="space-y-4">
@@ -345,12 +287,10 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="contract_number"
-                  name="contract_number"
-                  value={formData.contract_number}
-                  onChange={handleChange}
-                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  required
+                  {...register('contract_number')}
+                  className={`mt-1 block w-full px-3 py-2 border ${errors.contract_number ? 'border-red-300' : 'border-gray-300'} rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500`}
                 />
+                {renderError('contract_number')}
               </div>
               
               <div>
@@ -360,12 +300,10 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="supplier"
-                  name="supplier"
-                  value={formData.supplier}
-                  onChange={handleChange}
-                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  required
+                  {...register('supplier')}
+                  className={`mt-1 block w-full px-3 py-2 border ${errors.supplier ? 'border-red-300' : 'border-gray-300'} rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500`}
                 />
+                {renderError('supplier')}
               </div>
             </div>
             
@@ -375,13 +313,11 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
               </label>
               <textarea
                 id="description"
-                name="description"
-                value={formData.description}
-                onChange={handleChange}
+                {...register('description')}
                 rows="3"
-                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                required
+                className={`mt-1 block w-full px-3 py-2 border ${errors.description ? 'border-red-300' : 'border-gray-300'} rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500`}
               />
+              {renderError('description')}
             </div>
             
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -392,12 +328,10 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="start_date"
-                  name="start_date"
-                  value={formData.start_date}
-                  onChange={handleChange}
-                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  required
+                  {...register('start_date')}
+                  className={`mt-1 block w-full px-3 py-2 border ${errors.start_date ? 'border-red-300' : 'border-gray-300'} rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500`}
                 />
+                {renderError('start_date')}
               </div>
               
               <div>
@@ -407,12 +341,10 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="end_date"
-                  name="end_date"
-                  value={formData.end_date}
-                  onChange={handleChange}
-                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  required
+                  {...register('end_date')}
+                  className={`mt-1 block w-full px-3 py-2 border ${errors.end_date ? 'border-red-300' : 'border-gray-300'} rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500`}
                 />
+                {renderError('end_date')}
               </div>
               
               <div>
@@ -421,16 +353,14 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <select
                   id="status"
-                  name="status"
-                  value={formData.status}
-                  onChange={handleChange}
-                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  required
+                  {...register('status')}
+                  className={`mt-1 block w-full px-3 py-2 border ${errors.status ? 'border-red-300' : 'border-gray-300'} rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500`}
                 >
                   <option value="Active">Activo</option>
                   <option value="Pending">Pendiente</option>
                   <option value="Closed">Cerrado</option>
                 </select>
+                {renderError('status')}
               </div>
             </div>
             
@@ -441,16 +371,14 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <select
                   id="currency"
-                  name="currency"
-                  value={formData.currency}
-                  onChange={handleChange}
-                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  required
+                  {...register('currency')}
+                  className={`mt-1 block w-full px-3 py-2 border ${errors.currency ? 'border-red-300' : 'border-gray-300'} rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500`}
                 >
                   <option value="USD">USD</option>
                   <option value="EUR">EUR</option>
                   <option value="CLP">CLP</option>
                 </select>
+                {renderError('currency')}
               </div>
               
               <div>
@@ -460,14 +388,12 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="number"
                   id="total_amount"
-                  name="total_amount"
-                  value={formData.total_amount}
-                  onChange={handleChange}
+                  {...register('total_amount')}
                   step="0.01"
                   min="0"
-                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  required
+                  className={`mt-1 block w-full px-3 py-2 border ${errors.total_amount ? 'border-red-300' : 'border-gray-300'} rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500`}
                 />
+                {renderError('total_amount')}
               </div>
               
               <div>
@@ -477,15 +403,12 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="number"
                   id="remaining_amount"
-                  name="remaining_amount"
-                  value={formData.remaining_amount}
-                  onChange={handleChange}
+                  {...register('remaining_amount')}
                   step="0.01"
                   min="0"
-                  max={formData.total_amount}
-                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  required
+                  className={`mt-1 block w-full px-3 py-2 border ${errors.remaining_amount ? 'border-red-300' : 'border-gray-300'} rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500`}
                 />
+                {renderError('remaining_amount')}
               </div>
             </div>
           </div>
@@ -502,9 +425,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="good_service"
-                  name="good_service"
-                  value={formData.good_service}
-                  onChange={handleChange}
+                  {...register('good_service')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -516,9 +437,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="site"
-                  name="site"
-                  value={formData.site}
-                  onChange={handleChange}
+                  {...register('site')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -532,9 +451,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="process_name"
-                  name="process_name"
-                  value={formData.process_name}
-                  onChange={handleChange}
+                  {...register('process_name')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -546,9 +463,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="supply_area_name"
-                  name="supply_area_name"
-                  value={formData.supply_area_name}
-                  onChange={handleChange}
+                  {...register('supply_area_name')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -561,9 +476,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <select
                   id="contract_type"
-                  name="contract_type"
-                  value={formData.contract_type}
-                  onChange={handleChange}
+                  {...register('contract_type')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 >
                   <option value="Recurrente">Recurrente</option>
@@ -577,9 +490,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <select
                   id="opex_capex"
-                  name="opex_capex"
-                  value={formData.opex_capex}
-                  onChange={handleChange}
+                  {...register('opex_capex')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 >
                   <option value="OPEX">OPEX</option>
@@ -594,9 +505,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="contract_analyst"
-                  name="contract_analyst"
-                  value={formData.contract_analyst}
-                  onChange={handleChange}
+                  {...register('contract_analyst')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -610,9 +519,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="user_management"
-                  name="user_management"
-                  value={formData.user_management}
-                  onChange={handleChange}
+                  {...register('user_management')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -624,9 +531,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="category_n1_n2"
-                  name="category_n1_n2"
-                  value={formData.category_n1_n2}
-                  onChange={handleChange}
+                  {...register('category_n1_n2')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -647,9 +552,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="solped_budget_approved_date"
-                  name="solped_budget_approved_date"
-                  value={formData.solped_budget_approved_date}
-                  onChange={handleChange}
+                  {...register('solped_budget_approved_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -661,9 +564,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="strategy_committee_date"
-                  name="strategy_committee_date"
-                  value={formData.strategy_committee_date}
-                  onChange={handleChange}
+                  {...register('strategy_committee_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -675,9 +576,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="market_release_date"
-                  name="market_release_date"
-                  value={formData.market_release_date}
-                  onChange={handleChange}
+                  {...register('market_release_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -691,9 +590,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="queries_date"
-                  name="queries_date"
-                  value={formData.queries_date}
-                  onChange={handleChange}
+                  {...register('queries_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -705,9 +602,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="offers_reception_date"
-                  name="offers_reception_date"
-                  value={formData.offers_reception_date}
-                  onChange={handleChange}
+                  {...register('offers_reception_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -719,9 +614,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="technical_evaluation_date"
-                  name="technical_evaluation_date"
-                  value={formData.technical_evaluation_date}
-                  onChange={handleChange}
+                  {...register('technical_evaluation_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -735,9 +628,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="economic_evaluation_date"
-                  name="economic_evaluation_date"
-                  value={formData.economic_evaluation_date}
-                  onChange={handleChange}
+                  {...register('economic_evaluation_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -749,9 +640,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="negotiation_date"
-                  name="negotiation_date"
-                  value={formData.negotiation_date}
-                  onChange={handleChange}
+                  {...register('negotiation_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -763,9 +652,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="sc_committee_date"
-                  name="sc_committee_date"
-                  value={formData.sc_committee_date}
-                  onChange={handleChange}
+                  {...register('sc_committee_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -779,9 +666,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="site_committee_date"
-                  name="site_committee_date"
-                  value={formData.site_committee_date}
-                  onChange={handleChange}
+                  {...register('site_committee_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -793,9 +678,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="regional_committee_date"
-                  name="regional_committee_date"
-                  value={formData.regional_committee_date}
-                  onChange={handleChange}
+                  {...register('regional_committee_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -807,9 +690,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="global_committee_date"
-                  name="global_committee_date"
-                  value={formData.global_committee_date}
-                  onChange={handleChange}
+                  {...register('global_committee_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -823,9 +704,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="contract_signed_date"
-                  name="contract_signed_date"
-                  value={formData.contract_signed_date}
-                  onChange={handleChange}
+                  {...register('contract_signed_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -837,9 +716,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="kickoff_date"
-                  name="kickoff_date"
-                  value={formData.kickoff_date}
-                  onChange={handleChange}
+                  {...register('kickoff_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -851,9 +728,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="current_status"
-                  name="current_status"
-                  value={formData.current_status}
-                  onChange={handleChange}
+                  {...register('current_status')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -865,9 +740,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
               </label>
               <textarea
                 id="comment"
-                name="comment"
-                value={formData.comment}
-                onChange={handleChange}
+                {...register('comment')}
                 rows="3"
                 className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
               />
@@ -886,9 +759,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="contracting_type"
-                  name="contracting_type"
-                  value={formData.contracting_type}
-                  onChange={handleChange}
+                  {...register('contracting_type')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -900,9 +771,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="number"
                   id="budget_usd"
-                  name="budget_usd"
-                  value={formData.budget_usd}
-                  onChange={handleChange}
+                  {...register('budget_usd')}
                   step="0.01"
                   min="0"
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
@@ -918,12 +787,10 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="cmf_code"
-                  name="cmf_code"
-                  value={formData.cmf_code}
-                  onChange={handleChange}
-                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  required={formData.opex_capex === 'CAPEX'}
+                  {...register('cmf_code')}
+                  className={`mt-1 block w-full px-3 py-2 border ${errors.cmf_code ? 'border-red-300' : 'border-gray-300'} rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500`}
                 />
+                {renderError('cmf_code')}
                 <p className="mt-1 text-xs text-gray-500">Este campo es obligatorio para contratos CAPEX</p>
               </div>
             )}
@@ -936,9 +803,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="planned_process_start_date"
-                  name="planned_process_start_date"
-                  value={formData.planned_process_start_date}
-                  onChange={handleChange}
+                  {...register('planned_process_start_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -950,9 +815,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="contract_signed_end_date"
-                  name="contract_signed_end_date"
-                  value={formData.contract_signed_end_date}
-                  onChange={handleChange}
+                  {...register('contract_signed_end_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -966,9 +829,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="date"
                   id="real_award_date"
-                  name="real_award_date"
-                  value={formData.real_award_date}
-                  onChange={handleChange}
+                  {...register('real_award_date')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -980,9 +841,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="tender_code"
-                  name="tender_code"
-                  value={formData.tender_code}
-                  onChange={handleChange}
+                  {...register('tender_code')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -994,9 +853,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="number"
                   id="awarded_amount"
-                  name="awarded_amount"
-                  value={formData.awarded_amount}
-                  onChange={handleChange}
+                  {...register('awarded_amount')}
                   step="0.01"
                   min="0"
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
@@ -1012,9 +869,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="text"
                   id="sap_contract_number_new"
-                  name="sap_contract_number_new"
-                  value={formData.sap_contract_number_new}
-                  onChange={handleChange}
+                  {...register('sap_contract_number_new')}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
@@ -1026,9 +881,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 <input
                   type="number"
                   id="new_contract_term_months"
-                  name="new_contract_term_months"
-                  value={formData.new_contract_term_months}
-                  onChange={handleChange}
+                  {...register('new_contract_term_months')}
                   min="0"
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                 />
@@ -1038,7 +891,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
         )}
         
         {/* Pestaña: Datos SAP (Solo Lectura) */}
-        {activeTab === 'sap' && (
+        {activeTab === 'sap' && contract && (
           <div className="space-y-4">
             <div className="bg-gray-50 p-4 mb-4 rounded-md">
               <p className="text-sm text-gray-700">
@@ -1053,7 +906,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <input
                   type="text"
-                  value={formData.sap_contract_number}
+                  value={watch('sap_contract_number') || ''}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm bg-gray-50 text-gray-700"
                   disabled
                 />
@@ -1065,7 +918,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <input
                   type="text"
-                  value={formData.sap_supplier}
+                  value={watch('sap_supplier') || ''}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm bg-gray-50 text-gray-700"
                   disabled
                 />
@@ -1077,7 +930,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 Descripción (SAP)
               </label>
               <textarea
-                value={formData.sap_description}
+                value={watch('sap_description') || ''}
                 rows="3"
                 className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm bg-gray-50 text-gray-700"
                 disabled
@@ -1091,7 +944,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <input
                   type="text"
-                  value={formData.sap_start_date ? new Date(formData.sap_start_date).toLocaleDateString() : ''}
+                  value={watch('sap_start_date') || ''}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm bg-gray-50 text-gray-700"
                   disabled
                 />
@@ -1103,7 +956,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <input
                   type="text"
-                  value={formData.sap_end_date ? new Date(formData.sap_end_date).toLocaleDateString() : ''}
+                  value={watch('sap_end_date') || ''}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm bg-gray-50 text-gray-700"
                   disabled
                 />
@@ -1115,7 +968,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <input
                   type="text"
-                  value={formData.sap_currency}
+                  value={watch('sap_currency') || ''}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm bg-gray-50 text-gray-700"
                   disabled
                 />
@@ -1129,7 +982,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <input
                   type="text"
-                  value={formData.sap_total_amount ? formData.sap_total_amount.toLocaleString('es-CL', {style: 'currency', currency: formData.sap_currency || 'USD'}) : ''}
+                  value={watch('sap_total_amount') || ''}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm bg-gray-50 text-gray-700"
                   disabled
                 />
@@ -1141,7 +994,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <input
                   type="text"
-                  value={formData.sap_remaining_amount ? formData.sap_remaining_amount.toLocaleString('es-CL', {style: 'currency', currency: formData.sap_currency || 'USD'}) : ''}
+                  value={watch('sap_remaining_amount') || ''}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm bg-gray-50 text-gray-700"
                   disabled
                 />
@@ -1155,7 +1008,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <input
                   type="text"
-                  value={formData.sap_department}
+                  value={watch('sap_department') || ''}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm bg-gray-50 text-gray-700"
                   disabled
                 />
@@ -1167,7 +1020,7 @@ const ContractForm = ({ contract = null, onClose, mode = 'create' }) => {
                 </label>
                 <input
                   type="text"
-                  value={formData.sap_category}
+                  value={watch('sap_category') || ''}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm bg-gray-50 text-gray-700"
                   disabled
                 />
