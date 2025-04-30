@@ -48,50 +48,59 @@ const ContractRow = ({ contract }) => {
 
   return (
     <tr className={isEditing ? 'bg-blue-50' : ''}>
+      {/* COLUMNA NÚMERO - Ahora muestra el número de contrato (SAP) */}
       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
         <EditableCell
-          value={editedContract.contract_number}
+          value={editedContract.sap_contract_number || editedContract.contract_number}
           isEditing={isEditing}
           onChange={(value) => handleChange('contract_number', value)}
         />
       </td>
+      
+      {/* COLUMNA DESCRIPCIÓN - Ahora muestra el nombre del proceso */}
       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
         <EditableCell
-          value={editedContract.description}
+          value={editedContract.process_name || editedContract.description}
           isEditing={isEditing}
           onChange={(value) => handleChange('description', value)}
         />
       </td>
+      
+      {/* COLUMNA PROVEEDOR - Muestra el proveedor actual */}
       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
         <EditableCell
-          value={editedContract.supplier}
+          value={editedContract.supplier || editedContract.sap_supplier}
           isEditing={isEditing}
           onChange={(value) => handleChange('supplier', value)}
         />
       </td>
+      
+      {/* COLUMNA ESTADO - Muestra el estatus actual */}
       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
         {isEditing ? (
           <select
-            value={editedContract.status}
-            onChange={(e) => handleChange('status', e.target.value)}
+            value={editedContract.current_status || editedContract.status || "Desconocido"}
+            onChange={(e) => handleChange('current_status', e.target.value)}
             className="w-full px-2 py-1 border rounded"
           >
             <option value="Active">Activo</option>
             <option value="Pending">Pendiente</option>
             <option value="Closed">Cerrado</option>
+            <option value="Desconocido">Desconocido</option>
           </select>
         ) : (
           <span className={`inline-flex px-2 py-1 text-xs rounded-full ${
-            contract.status === 'Active' ? 'bg-green-100 text-green-800' :
-            contract.status === 'Pending' ? 'bg-yellow-100 text-yellow-800' :
-            'bg-red-100 text-red-800'
+            contract.current_status === 'Active' ? 'bg-green-100 text-green-800' :
+            contract.current_status === 'Pending' ? 'bg-yellow-100 text-yellow-800' :
+            contract.current_status === 'Closed' ? 'bg-red-100 text-red-800' :
+            'bg-gray-100 text-gray-800'
           }`}>
-            {contract.status === 'Active' ? 'Activo' :
-             contract.status === 'Pending' ? 'Pendiente' :
-             'Cerrado'}
+            {contract.current_status || contract.status || "Desconocido"}
           </span>
         )}
       </td>
+      
+      {/* COLUMNA FECHAS - Muestra fechas de inicio y fin del proceso */}
       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
         <div className="flex flex-col">
           <div>
@@ -99,12 +108,12 @@ const ContractRow = ({ contract }) => {
             {isEditing ? (
               <input
                 type="date"
-                value={editedContract.start_date ? editedContract.start_date.split('T')[0] : ''}
-                onChange={(e) => handleChange('start_date', e.target.value)}
+                value={editedContract.planned_process_start_date ? editedContract.planned_process_start_date.split('T')[0] : ''}
+                onChange={(e) => handleChange('planned_process_start_date', e.target.value)}
                 className="ml-1 px-2 py-1 border rounded w-32"
               />
             ) : (
-              <span className="ml-1">{formatDate(contract.start_date)}</span>
+              <span className="ml-1">{formatDate(contract.planned_process_start_date) || formatDate(contract.start_date) || '-'}</span>
             )}
           </div>
           <div>
@@ -112,16 +121,18 @@ const ContractRow = ({ contract }) => {
             {isEditing ? (
               <input
                 type="date"
-                value={editedContract.end_date ? editedContract.end_date.split('T')[0] : ''}
-                onChange={(e) => handleChange('end_date', e.target.value)}
+                value={editedContract.contract_signed_end_date ? editedContract.contract_signed_end_date.split('T')[0] : ''}
+                onChange={(e) => handleChange('contract_signed_end_date', e.target.value)}
                 className="ml-1 px-2 py-1 border rounded w-32"
               />
             ) : (
-              <span className="ml-1">{formatDate(contract.end_date)}</span>
+              <span className="ml-1">{formatDate(contract.contract_signed_end_date) || formatDate(contract.end_date) || '-'}</span>
             )}
           </div>
         </div>
       </td>
+      
+      {/* COLUMNA VALORES - Muestra montos totales y restantes */}
       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
         <div className="flex flex-col">
           <div>
@@ -145,7 +156,7 @@ const ContractRow = ({ contract }) => {
                 />
               </div>
             ) : (
-              <span className="ml-1">{formatCurrency(contract.total_amount, contract.currency)}</span>
+              <span className="ml-1">{formatCurrency(contract.total_amount, contract.currency) || '-'}</span>
             )}
           </div>
           <div>
@@ -158,11 +169,13 @@ const ContractRow = ({ contract }) => {
                 className="ml-1 px-2 py-1 border rounded w-24"
               />
             ) : (
-              <span className="ml-1">{formatCurrency(contract.remaining_amount, contract.currency)}</span>
+              <span className="ml-1">{formatCurrency(contract.remaining_amount, contract.currency) || '-'}</span>
             )}
           </div>
         </div>
       </td>
+      
+      {/* COLUMNA ACCIONES */}
       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
         <div className="flex space-x-2">
           {isEditing ? (

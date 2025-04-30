@@ -5,6 +5,10 @@ from app.models.user import User
 from app.core.security import get_current_user
 import os
 from typing import Dict, Any
+import json
+
+# Define BASE_DIR as the application root directory
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Verificar si la biblioteca Office365 está disponible
 try:
@@ -181,26 +185,29 @@ async def get_sharepoint_settings(
             "auto_sync_interval_minutes": int(os.getenv("AUTO_SYNC_INTERVAL_MINUTES", "60"))
         }
 
+# Añade a config.py o a sharepoint.py
+def save_sharepoint_config(config_data):
+    config_file = os.path.join(BASE_DIR, "config", "sharepoint_config.json")
+    os.makedirs(os.path.dirname(config_file), exist_ok=True)
+    with open(config_file, 'w') as f:
+        json.dump(config_data, f)
+
+def load_sharepoint_config():
+    config_file = os.path.join(BASE_DIR, "config", "sharepoint_config.json")
+    if os.path.exists(config_file):
+        with open(config_file, 'r') as f:
+            return json.load(f)
+    return {}
+
 @router.post("/settings", status_code=status.HTTP_200_OK)
 async def update_sharepoint_settings(
     settings_data: Dict[str, Any],
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Actualiza la configuración de SharePoint (simulado)
-    """
     if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tiene permisos para realizar esta acción"
-        )
+        raise HTTPException(status_code=403, detail="No permitido")
     
-    # En un entorno real, aquí actualizaríamos las variables de entorno
-    # o una configuración en base de datos. Para este ejemplo, solo simulamos.
+    # Guardar en archivo de configuración
+    save_sharepoint_config(settings_data)
     
-    print(f"Configuración recibida para actualizar: {settings_data}")
-    
-    return {
-        "message": "Configuración actualizada con éxito (simulación)",
-        "settings": settings_data
-    }
+    return {"message": "Configuración guardada exitosamente"}

@@ -21,8 +21,14 @@ def read_contracts(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    contracts = db.query(Contract).offset(skip).limit(limit).all()
-    return contracts
+    try:
+        contracts = db.query(Contract).offset(skip).limit(limit).all()
+        return contracts
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al recuperar contratos: {str(e)}"
+        )
 
 @router.post("/", response_model=ContractResponse, status_code=status.HTTP_201_CREATED)
 def create_contract(

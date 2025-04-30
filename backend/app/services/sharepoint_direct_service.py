@@ -5,9 +5,12 @@ import os
 import tempfile
 import requests
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 from sqlalchemy.orm import Session
 from app.services.excel_service import import_from_excel, export_to_excel
+import pandas as pd
+from app.models.contract import Contract
+from app.models.user import User
 
 class SharePointDirectService:
     """
@@ -142,7 +145,7 @@ class SharePointDirectService:
             print(f"Error al preparar archivo para subida a SharePoint: {str(e)}")
             raise Exception(f"Error al preparar archivo para subida a SharePoint: {str(e)}")
     
-    def sync_from_sharepoint(self, db: Session, user_id: int):
+    def sync_from_sharepoint(self, db: Session, user_id: int, sheet_name="Sourcing Plan"):
         """
         Sincroniza los datos desde el Excel compartido a la base de datos
         """
@@ -150,8 +153,8 @@ class SharePointDirectService:
             # Descargar el archivo desde el enlace compartido
             excel_path = self.download_excel()
             
-            # Importar datos a la base de datos
-            result = import_from_excel(excel_path, db, user_id)
+            # Importar datos a la base de datos, especificando la hoja correcta
+            result = import_from_excel(excel_path, db, user_id, sheet_name=sheet_name)
             
             # Limpiar el archivo temporal
             if os.path.exists(excel_path):
@@ -164,22 +167,180 @@ class SharePointDirectService:
     
     def sync_to_sharepoint(self, db: Session):
         """
-        Exporta los datos a un Excel para subir manualmente a SharePoint
+        Sincroniza los datos desde la base de datos hacia el mismo Excel en SharePoint,
+        preservando su estructura original
         """
         try:
-            # Exportar datos a un archivo Excel temporal
-            excel_path = export_to_excel(db)
+            # Paso 1: Descargar el Excel actual para preservar su estructura
+            excel_path = self.download_excel()
             
-            # Preparar el archivo para subida manual
-            result = self.upload_excel(excel_path)
+            # Paso 2: Leer el Excel para obtener su estructura original
+            original_df = pd.read_excel(excel_path)
             
-            # Conservamos el archivo para subida manual
-            # No lo eliminamos como en el método original
+            # Guarda una copia de respaldo antes de modificar
+            backup_dir = Path("./backups")
+            backup_dir.mkdir(exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = backup_dir / f"sourcing_plan_backup_{timestamp}.xlsx"
+            original_df.to_excel(backup_path, index=False)
             
-            return result
+            # Paso 3: Obtener todos los contratos de la base de datos
+            contracts = db.query(Contract).all()
+            
+            # Paso 4: Preparar los datos actualizados manteniendo la estructura original
+            updated_data = []
+            
+            # Convertir columnas a strings para evitar problemas de comparación
+            original_df.columns = [str(col) for col in original_df.columns]
+            
+            # Crear un mapeo de campos del modelo a columnas del Excel
+            # Este mapeo debe ser preciso y completo
+            model_to_excel = {
+                'sap_contract_number': ['Contrato SAP Vigente (Antiguo) o "N/A"', 'Contrato SAP Vigente (Antiguo)', 'Número de Contrato SAP'],
+                'supplier': ['PROVEEDOR ACTUAL o PRINCIPAL', 'Proveedor SAP'],
+                'sap_start_date': ['Fecha de inicio Contrato Vigente SAP', 'Fecha Inicio SAP'],
+                'sap_end_date': ['Fecha Vencimiento Contrato SAP', 'Fecha Fin SAP', 'Fecha Vencimiento Contrato SAP (Fecha Límite)'],
+                'currency': ['Moneda', 'Moneda SAP'],
+                'sap_total_amount': ['Monto contrato SAP', 'Valor Actual Contrato Vigente SAP', 'Monto Total SAP'],
+                'sap_remaining_amount': ['Monto de consumo SAP', 'Monto Restante SAP'],
+                'good_service': ['Bien / Servicio'],
+                'site': ['Sitio'],
+                'process_name': ['Nombre Proceso'],
+                'supply_area_name': ['Nombre de Área Supply'],
+                'contract_type': ['Tipo de Contrato'],
+                'opex_capex': ['OPEX / CAPEX'],
+                'contract_analyst': ['Analista de Contratos'],
+                'category_n1_n2': ['Categoría (N1+N2)', 'Categoría Supply'],
+                'contracting_type': ['Tipo de Contratación'],
+                'budget_usd': ['Budget (USD) Informado por Finanzas'],
+                'cmf_code': ['Código Interno Planificación (CMF)'],
+                'planned_process_start_date': ['Fecha de Inicio del Proceso (Planificado)'],
+                'contract_signed_end_date': ['Fecha de Fin "11.Finalizado (Contrato Firmado)"']
+            }
+            
+            # Añadir mapeo para hitos
+            milestone_mapping = {
+                'solped_budget_approved_date': ['Solped con Budget Aprobado'],
+                'strategy_committee_date': ['Comité de Estrategia'],
+                'market_release_date': ['Salida a mercado'],
+                'queries_date': ['Consultas'],
+                'offers_reception_date': ['Recepción ofertas'],
+                'technical_evaluation_date': ['Evaluación técnica'],
+                'economic_evaluation_date': ['Evaluación económica'],
+                'negotiation_date': ['Negociación'],
+                'sc_committee_date': ['Comité SC'],
+                'site_committee_date': ['Comité de sitio'],
+                'regional_committee_date': ['Comité regional'],
+                'global_committee_date': ['Comité global'],
+                'contract_signed_date': ['Fecha de Adjudicación (Contrato firmado)'],
+                'kickoff_date': ['Kickoff'],
+                'current_status': ['Estatus Actual'],
+                'comment': ['Comentario'],
+                'real_award_date': ['Fecha Adjudicación Real'],
+                'tender_code': ['Código Licitación'],
+                'awarded_amount': ['Monto Adjudicado'],
+                'sap_contract_number_new': ['Número de Contrato en SAP'],
+                'new_contract_term_months': ['Plazo del nuevo contrato (meses)'],
+                'progress_percentage': ['% de Avance'],
+                'process_start_alert': ['Alerta Inicio proceso'],
+                'renewal_alert': ['Alerta Renovación del Contrato', 'Alerta de consumo de Contrato']
+            }
+            
+            # Combinar los mapeos
+            model_to_excel.update(milestone_mapping)
+            
+            # Paso 5: Construir mapeo inverso para búsqueda eficiente
+            excel_to_model = {}
+            for model_field, excel_columns in model_to_excel.items():
+                for excel_col in excel_columns:
+                    excel_to_model[excel_col] = model_field
+            
+            # Paso 6: Crear clave de identificación para buscar contratos existentes
+            # Usamos el número de contrato como clave principal
+            contract_keys = {}
+            for contract in contracts:
+                key = contract.sap_contract_number or contract.contract_number
+                if key:
+                    contract_keys[key] = contract
+            
+            # Paso 7: Actualizar las filas existentes y añadir nuevas filas desde la BD
+            updated_rows = []
+            processed_contracts = set()
+            
+            # Primero procesar las filas que ya existen en el Excel
+            for _, row in original_df.iterrows():
+                # Intentar encontrar la clave del contrato en esta fila
+                contract_key = None
+                for col_name in ['Contrato SAP Vigente (Antiguo) o "N/A"', 'Contrato SAP Vigente (Antiguo)', 'Número de Contrato SAP']:
+                    if col_name in row and pd.notna(row[col_name]):
+                        contract_key = str(row[col_name])
+                        break
+                
+                # Si encontramos el contrato en la BD, actualizar los valores
+                if contract_key and contract_key in contract_keys:
+                    contract = contract_keys[contract_key]
+                    processed_contracts.add(contract_key)
+                    
+                    # Copiar la fila original
+                    updated_row = row.copy()
+                    
+                    # Actualizar los campos que han cambiado en la BD
+                    for excel_col in row.index:
+                        if excel_col in excel_to_model:
+                            model_field = excel_to_model[excel_col]
+                            value = getattr(contract, model_field)
+                            if value is not None:
+                                if isinstance(value, (datetime, date)):
+                                    # Para fechas, mantener el formato original
+                                    updated_row[excel_col] = value
+                                else:
+                                    updated_row[excel_col] = value
+                    
+                    updated_rows.append(updated_row)
+                else:
+                    # Si no encontramos el contrato, mantener la fila original
+                    updated_rows.append(row)
+            
+            # Añadir contratos nuevos que no estaban en el Excel original
+            for contract_key, contract in contract_keys.items():
+                if contract_key not in processed_contracts:
+                    new_row = {}
+                    
+                    # Asignar valores del contrato a columnas del Excel
+                    for model_field, excel_columns in model_to_excel.items():
+                        value = getattr(contract, model_field)
+                        if value is not None:
+                            # Usar la primera columna asociada al campo del modelo
+                            for excel_col in excel_columns:
+                                if excel_col in original_df.columns:
+                                    new_row[excel_col] = value
+                                    break
+                    
+                    updated_rows.append(pd.Series(new_row, index=original_df.columns))
+            
+            # Paso 8: Crear el DataFrame actualizado con la misma estructura
+            updated_df = pd.DataFrame(updated_rows, columns=original_df.columns)
+            
+            # Paso 9: Guardar el DataFrame actualizado en el mismo archivo
+            updated_df.to_excel(excel_path, index=False)
+            
+            # Paso 10: Subir el archivo actualizado a SharePoint
+            upload_result = self.upload_excel(excel_path)
+            
+            # Limpiar el archivo temporal
+            try:
+                os.remove(excel_path)
+            except:
+                print(f"No se pudo eliminar el archivo temporal: {excel_path}")
+            
+            return {
+                "message": "Sincronización exitosa con SharePoint. Excel actualizado manteniendo su estructura original.",
+                "file_path": str(excel_path) if os.path.exists(excel_path) else None
+            }
+        
         except Exception as e:
-            print(f"Error en la preparación para sincronización hacia SharePoint: {str(e)}")
-            raise Exception(f"Error en la preparación para sincronización hacia SharePoint: {str(e)}")
+            print(f"Error en sincronización hacia SharePoint: {str(e)}")
+            raise Exception(f"Error en sincronización hacia SharePoint: {str(e)}")
 
 # Para uso de prueba y desarrollo
 if __name__ == "__main__":
