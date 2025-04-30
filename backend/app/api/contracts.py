@@ -14,6 +14,25 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+# Añade esta función en app/api/excel.py o app/api/contracts.py
+@router.post("/reset-database", status_code=status.HTTP_200_OK)
+def reset_database(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Elimina todos los contratos de la base de datos para empezar de nuevo"""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Solo administradores pueden reiniciar la base de datos")
+    
+    try:
+        # Eliminar todos los contratos
+        db.query(Contract).delete()
+        db.commit()
+        return {"message": "Base de datos reiniciada correctamente"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error al reiniciar la base de datos: {str(e)}")
+
 @router.get("/", response_model=List[ContractResponse])
 def read_contracts(
     skip: int = 0, 

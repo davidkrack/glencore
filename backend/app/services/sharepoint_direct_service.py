@@ -145,7 +145,7 @@ class SharePointDirectService:
             print(f"Error al preparar archivo para subida a SharePoint: {str(e)}")
             raise Exception(f"Error al preparar archivo para subida a SharePoint: {str(e)}")
     
-    def sync_from_sharepoint(self, db: Session, user_id: int, sheet_name="Sourcing Plan"):
+    def sync_from_sharepoint(self, db: Session, user_id: int):
         """
         Sincroniza los datos desde el Excel compartido a la base de datos
         """
@@ -153,8 +153,8 @@ class SharePointDirectService:
             # Descargar el archivo desde el enlace compartido
             excel_path = self.download_excel()
             
-            # Importar datos a la base de datos, especificando la hoja correcta
-            result = import_from_excel(excel_path, db, user_id, sheet_name=sheet_name)
+            # Importar datos a la base de datos, ESPECIFICANDO LA HOJA (esto es lo que causa el error)
+            result = import_from_excel(excel_path, db, user_id, sheet_name="Sourcing Plan")
             
             # Limpiar el archivo temporal
             if os.path.exists(excel_path):

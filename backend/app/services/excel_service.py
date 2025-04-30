@@ -2,18 +2,20 @@ import pandas as pd
 import tempfile
 import json
 import os
+import uuid
 from datetime import datetime, date, time
 from sqlalchemy.orm import Session
 from app.models.contract import Contract
 from pathlib import Path
+from sqlalchemy.exc import IntegrityError
 
 def json_serial(obj):
-    """Función de serialización JSON para objetos datetime/date/time."""
+    """Función de serialización JSON para objetos que no son serializables por defecto."""
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     elif isinstance(obj, time):
         return obj.isoformat()
-    raise TypeError(f"Tipo {type(obj)} no serializable")
+    return str(obj) 
 
 def safe_convert_to_date(value):
     """Convierte un valor a fecha, devolviendo None si no es una fecha válida"""
@@ -108,447 +110,259 @@ def calculate_progress_percentage(row):
     except:
         return 0
 
-def import_from_excel(file_path: str, db: Session, user_id: int, sheet_name="Sourcing Plan"):
+def import_from_excel(file_path: str, db: Session, user_id: int, sheet_name=None):
     """
-    Importa datos de un archivo Excel a la base de datos siguiendo la estructura del Sourcing Plan
+    Versión mejorada de importación de Excel a la base de datos que maneja contratos repetidos
     """
     try:
-        # Leer el archivo Excel, especificando la hoja "Sourcing Plan"
-        df = pd.read_excel(file_path, sheet_name=sheet_name)
+        # Primero, listar todas las hojas disponibles para diagnóstico
+        excel_file = pd.ExcelFile(file_path)
+        sheet_names = excel_file.sheet_names
+        print(f"Hojas disponibles en el archivo: {sheet_names}")
         
-        # Imprimir información para diagnóstico
-        print(f"Leyendo datos de la hoja: {sheet_name}")
-        print(f"Columnas encontradas: {df.columns.tolist()}")
-        print(f"Total de filas: {len(df)}")
+        # Intentar leer el archivo con diferentes opciones de sheet_name
+        try:
+            if sheet_name and sheet_name in sheet_names:
+                # Usar la hoja especificada si se proporciona y existe
+                df = pd.read_excel(file_path, sheet_name=sheet_name)
+                print(f"Usando hoja especificada: '{sheet_name}'")
+            elif "Sourcing Plan" in sheet_names:
+                # Intentar con "Sourcing Plan" si existe
+                df = pd.read_excel(file_path, sheet_name="Sourcing Plan")
+                print("Usando hoja 'Sourcing Plan'")
+            else:
+                # Si no funciona, usar la primera hoja
+                df = pd.read_excel(file_path, sheet_name=sheet_names[0])
+                print(f"Usando primera hoja: {sheet_names[0]}")
+        except Exception as sheet_error:
+            print(f"Error al intentar leer hojas específicas: {sheet_error}")
+            # Último recurso - intentar leer con índice 0
+            try:
+                df = pd.read_excel(file_path, sheet_name=0)
+                print(f"Usando hoja por índice 0")
+            except Exception as e:
+                print(f"Error crítico al leer Excel: {e}")
+                raise Exception(f"No se pudo leer ninguna hoja del archivo Excel: {e}")
         
-        # Convertir todos los nombres de columnas a strings para evitar problemas
+        # Convertir nombres de columnas a strings
         df.columns = [str(col) for col in df.columns]
         
-        # Imprimir nombres de columnas para diagnóstico
-        print("Columnas en el Excel:", df.columns.tolist())
+        # Imprimir para diagnóstico
+        print(f"Columnas encontradas: {df.columns.tolist()}")
+        print(f"Total de filas: {len(df)}")
+        if len(df) > 0:
+            print(f"Ejemplo de las primeras filas:")
+            for i, row in df.head(min(3, len(df))).iterrows():
+                sample_values = [row.get(col) for col in df.columns[:5]] if len(df.columns) > 0 else []
+                print(f"Fila {i}: {sample_values}...")
         
-        # Contador de contratos importados
+        # Tracking de números de contrato procesados para manejar duplicados
+        processed_contracts = {}
+        
+        # Procesar cada fila
         contracts_imported = 0
+        contracts_updated = 0
         
-        # Mapeo más flexible para columnas obligatorias - incluye posibles variaciones en los nombres
-        flexible_mapping = {
-            # Para contract_number - columna A
-            'contract_number': [
-                'Contrato SAP Vigente (Antiguo)', 'Contrato SAP', 'Número de Contrato',
-                'Contrato SAP Vigente (Antiguo) o "N/A"', '0', 0, 'A'
-            ],
-            # Para supplier - columna B
-            'supplier': [
-                'PROVEEDOR ACTUAL o PRINCIPAL', 'Proveedor', 'Proveedor SAP', '1', 1, 'B'
-            ],
-            # Para description - columna K o combinación de otras
-            'description': [
-                'Bien / Servicio', 'Descripción', 'Nombre Proceso', 
-                'Descripción SAP', '10', 10, 'K'
-            ]
-        }
-        
-        # Mapeo de columnas del Excel a campos del modelo
-        # Primera sección: Datos SAP (A-J)
-        sap_mapping = {
-            'Número de Contrato SAP': 'sap_contract_number',
-            'Descripción SAP': 'sap_description',
-            'Proveedor SAP': 'sap_supplier',
-            'Fecha Inicio SAP': 'sap_start_date',
-            'Fecha Fin SAP': 'sap_end_date',
-            'Moneda SAP': 'sap_currency',
-            'Monto Total SAP': 'sap_total_amount',
-            'Monto Restante SAP': 'sap_remaining_amount',
-            'Departamento SAP': 'sap_department',
-            'Categoría SAP': 'sap_category',
-            'Contrato SAP Vigente (Antiguo)': 'sap_contract_number',
-            'Contrato SAP Vigente (Antiguo) o "N/A"': 'sap_contract_number',
-            'PROVEEDOR ACTUAL o PRINCIPAL': 'sap_supplier',
-            'Fecha de inicio Contrato Vigente SAP': 'sap_start_date',
-            'Fecha Vencimiento Contrato SAP': 'sap_end_date',
-            'Fecha Vencimiento Contrato SAP (Fecha Límite)': 'sap_end_date',
-            'Moneda': 'sap_currency',
-            'Monto contrato SAP': 'sap_total_amount',
-            'Monto de consumo SAP': 'sap_remaining_amount',
-            'Monto contrato SAP en USD': 'sap_total_amount_usd',
-            'Monto de consumo SAP en USD': 'sap_remaining_amount_usd'
-        }
-        
-        # Segunda sección: Datos analistas (K-S)
-        analyst_mapping = {
-            'Bien / Servicio': 'good_service',
-            'Sitio': 'site',
-            'Nombre Proceso': 'process_name',
-            'Nombre de Área Supply': 'supply_area_name',
-            'Tipo de Contrato': 'contract_type',
-            'OPEX / CAPEX': 'opex_capex',
-            'Analista de Contratos': 'contract_analyst',
-            'Gerencia Usuaria': 'user_management',
-            'Categoría (N1+N2)': 'category_n1_n2',
-            'Alerta de consumo de Contrato': 'contract_alert'
-        }
-        
-        # Campos adicionales y hitos del proceso
-        additional_mapping = {
-            'Tipo de Contratación': 'contracting_type',
-            'Budget (USD) Informado por Finanzas': 'budget_usd',
-            'Código Interno Planificación (CMF)': 'cmf_code',
-            'Fecha de Inicio del Proceso (Planificado)': 'planned_process_start_date',
-            'Fecha de Fin "11.Finalizado (Contrato Firmado)"': 'contract_signed_end_date',
-            'Solped con Budget Aprobado': 'solped_budget_approved_date',
-            'Comité de Estrategia': 'strategy_committee_date',
-            'Salida a mercado': 'market_release_date',
-            'Consultas': 'queries_date',
-            'Recepción ofertas': 'offers_reception_date',
-            'Evaluación técnica': 'technical_evaluation_date',
-            'Evaluación económica': 'economic_evaluation_date',
-            'Negociación': 'negotiation_date',
-            'Comité SC': 'sc_committee_date',
-            'Comité de sitio': 'site_committee_date',
-            'Comité regional': 'regional_committee_date',
-            'Comité global': 'global_committee_date',
-            'Fecha de Adjudicación (Contrato firmado)': 'contract_signed_date',
-            'Kickoff': 'kickoff_date',
-            'Estatus Actual': 'current_status',
-            'Comentario': 'comment',
-            'Fecha Adjudicación Real': 'real_award_date',
-            'Código Licitación': 'tender_code',
-            'Monto Adjudicado': 'awarded_amount',
-            'Número de Contrato en SAP': 'sap_contract_number_new',
-            'Plazo del nuevo contrato (meses)': 'new_contract_term_months'
-        }
-        
-        # Combinar todos los mapeos
-        field_mapping = {
-            **sap_mapping,
-            **analyst_mapping,
-            **additional_mapping,
-            # Campos básicos también incluidos para compatibilidad
-            'Número de Contrato': 'contract_number',
-            'Descripción': 'description',
-            'Proveedor': 'supplier',
-            'Estado': 'status',
-            'Fecha Inicio': 'start_date',
-            'Fecha Fin': 'end_date',
-            'Moneda': 'currency',
-            'Monto Total': 'total_amount',
-            'Monto Restante': 'remaining_amount'
-        }
-        
-        # Identificar columnas adicionales que no están en el mapeo
-        all_columns = df.columns.tolist()
-        mapped_columns = list(field_mapping.keys())
-        additional_columns = [col for col in all_columns if col not in mapped_columns]
-        
-        # Procesar cada fila del Excel
-        for _, row in df.iterrows():
-            # Preparar diccionario de contrato
-            contract_data = {}
+        for idx, row in df.iterrows():
+            # Crear un contrato básico con los campos mínimos necesarios
+            contract_data = {
+                "contract_number": f"AUTO-{datetime.now().strftime('%Y%m%d%H%M%S')}-{idx}",  # Default único
+                "description": "Contrato importado",
+                "supplier": "Proveedor importado",
+                "created_by": user_id,
+                "updated_by": user_id
+            }
             
-            # 1. Primero, asignar campos obligatorios usando el mapeo flexible
-            for field, possible_cols in flexible_mapping.items():
-                # Buscar en todas las posibles columnas
-                for col in possible_cols:
-                    # Verificar si es índice numérico o nombre de columna
-                    value = None
-                    if isinstance(col, int) and 0 <= col < len(row):
-                        value = row.iloc[col]
-                    elif isinstance(col, str):
-                        if col.isdigit():  # Si es string numérico, usarlo como índice
-                            col_idx = int(col)
-                            if 0 <= col_idx < len(row):
-                                value = row.iloc[col_idx]
-                        elif col in row.index:
-                            value = row[col]
-                        
-                    # Si encontramos un valor no nulo, usarlo
-                    if value is not None and pd.notna(value):
-                        contract_data[field] = value
+            # Intentar extraer los datos básicos de las columnas conocidas
+            known_columns = {
+                "contract_number": ["Contrato SAP Vigente (Antiguo)", "Contrato SAP", "Número de Contrato", 
+                                   "Contrato SAP Vigente (Antiguo) o \"N/A\"", "Número"],
+                "supplier": ["PROVEEDOR ACTUAL o PRINCIPAL", "Proveedor", "Proveedor SAP"],
+                "description": ["Nombre Proceso", "Bien / Servicio", "Descripción", "Descripción SAP"],
+                "status": ["Estado", "Estatus Actual", "current_status"],
+                "site": ["Sitio"],
+                "currency": ["Moneda"],
+                "sap_contract_number": ["Contrato SAP Vigente (Antiguo)", "Número de Contrato SAP"],
+                "sap_supplier": ["PROVEEDOR ACTUAL o PRINCIPAL", "Proveedor SAP"],
+                "good_service": ["Bien / Servicio"],
+                "process_name": ["Nombre Proceso"]
+            }
+            
+            # Intentar extraer valores de columnas conocidas
+            for field, possible_columns in known_columns.items():
+                for col in possible_columns:
+                    if col in df.columns and pd.notna(row[col]):
+                        if isinstance(row[col], (int, float)):
+                            contract_data[field] = str(row[col])
+                        else:
+                            contract_data[field] = row[col]
                         break
-                
-                # Si no se encontró valor para el campo obligatorio, asignar uno predeterminado
-                if field not in contract_data or pd.isna(contract_data[field]):
-                    if field == 'contract_number':
-                        contract_data[field] = f"AUTO-{datetime.now().strftime('%Y%m%d%H%M%S')}-{_}"
-                    elif field == 'supplier':
-                        contract_data[field] = "Proveedor no especificado"
-                    elif field == 'description':
-                        contract_data[field] = f"Contrato {_}"
             
-            # 2. Ahora procesar el resto de campos usando el mapeo normal
-            for excel_col, model_field in field_mapping.items():
-                if excel_col in row.index and pd.notna(row[excel_col]):
-                    value = row[excel_col]
-                    
-                    # Procesamiento especial para columnas monetarias problemáticas
-                    if excel_col in ['Valor Actual Contrato Vigente SAP', 'Valor Estimado Nueva Licitación en Moneda Local', 
-                                     'Monto contrato SAP', 'Monto de consumo SAP']:
-                        try:
-                            if isinstance(value, (int, float)):
-                                contract_data[model_field] = float(value)
-                            elif isinstance(value, str) and value.strip():
-                                # Si es un string, intentar convertirlo a número eliminando formato
-                                value = value.replace(',', '').replace('$', '').strip()
-                                contract_data[model_field] = float(value)
-                        except:
-                            # Si no se puede convertir, omitir
-                            continue
-                        continue  # Saltamos el procesamiento normal para estas columnas
-                    
-                    # Manejar diferentes tipos de campos
-                    if model_field.endswith('_date'):
-                        # Es un campo de fecha
-                        if isinstance(value, pd.Timestamp):
-                            value = value.date()
-                        elif isinstance(value, (int, float)) and not is_valid_date_value(value):
-                            # Valores numéricos grandes que Excel interpreta incorrectamente como fechas
-                            continue
-                    elif any(keyword in model_field for keyword in ['amount', 'budget', 'value']):
-                        # Es un campo monetario
-                        try:
-                            value = float(value)
-                        except:
-                            continue
-                    
-                    contract_data[model_field] = value
-            
-            # 3. Calcular campos automáticos - asegurar que existan en el modelo
-            try:
-                contract_data['renewal_alert'] = calculate_renewal_alert(contract_data)
-                contract_data['process_start_alert'] = calculate_process_start_alert(contract_data)
-                contract_data['progress_percentage'] = calculate_progress_percentage(contract_data)
-            except Exception as e:
-                print(f"Error al calcular campos automáticos: {e}")
-                # Si hay error, guardar en additional_data
-                if 'additional_data' not in contract_data:
-                    contract_data['additional_data'] = "{}"
-                
-                # Asegurar que additional_data sea un JSON válido
-                try:
-                    additional_data = json.loads(contract_data['additional_data'])
-                except:
-                    additional_data = {}
-                
-                # Calcular y guardar valores
-                try:
-                    additional_data['renewal_alert'] = calculate_renewal_alert(contract_data)
-                except:
-                    pass
-                
-                try:
-                    additional_data['process_start_alert'] = calculate_process_start_alert(contract_data)
-                except:
-                    pass
-                
-                try:
-                    additional_data['progress_percentage'] = calculate_progress_percentage(contract_data)
-                except:
-                    pass
-                
-                # Convertir de nuevo a JSON
-                contract_data['additional_data'] = json.dumps(additional_data, default=json_serial)
-            
-            # 4. Preparar datos adicionales
+            # Guardar todos los datos adicionales de la fila
             additional_data = {}
-            for col in additional_columns:
-                if col in row.index and pd.notna(row[col]):
-                    try:
-                        # Asegurar que las claves sean strings
-                        additional_data[str(col)] = row[col]
-                    except Exception as e:
-                        print(f"Error al procesar columna adicional {col}: {e}")
+            for col_name, value in row.items():
+                if pd.notna(value):
+                    # Ignorar valores nulos
+                    col_str = str(col_name).strip()
+                    
+                    # Convertir fechas y otros tipos especiales para JSON
+                    if isinstance(value, (datetime, date)):
+                        additional_data[col_str] = value.isoformat()
+                    elif isinstance(value, (int, float, bool)):
+                        additional_data[col_str] = value
+                    else:
+                        additional_data[col_str] = str(value)
             
             if additional_data:
-                # Si ya hay additional_data, combinarlo
-                if 'additional_data' in contract_data:
-                    try:
-                        existing_data = json.loads(contract_data['additional_data'])
-                        if isinstance(existing_data, dict):
-                            existing_data.update(additional_data)
-                            additional_data = existing_data
-                    except:
-                        pass
+                contract_data["additional_data"] = json.dumps(additional_data, default=json_serial)
+            
+            # Asegurarse de que los campos obligatorios tengan valores
+            if not contract_data.get("contract_number") or contract_data["contract_number"] == "nan":
+                contract_data["contract_number"] = f"AUTO-{datetime.now().strftime('%Y%m%d%H%M%S')}-{idx}"
+            
+            if not contract_data.get("description") or contract_data["description"] == "nan":
+                contract_data["description"] = f"Contrato importado #{idx}"
+            
+            if not contract_data.get("supplier") or contract_data["supplier"] == "nan":
+                contract_data["supplier"] = "Proveedor no especificado"
+            
+            # Manejar contratos duplicados - añadir sufijo único si es necesario
+            original_contract_number = contract_data["contract_number"]
+            contract_identifier = original_contract_number
+            
+            # Si este número de contrato ya existe, añadir identificadores adicionales
+            if contract_identifier in processed_contracts:
+                # Buscar otros campos que puedan ayudar a diferenciar (como bien/servicio o descripción)
+                differentiators = []
+                if "good_service" in contract_data and contract_data["good_service"]:
+                    differentiators.append(str(contract_data["good_service"]))
+                if "description" in contract_data and contract_data["description"]:
+                    differentiators.append(str(contract_data["description"]))
+                if "site" in contract_data and contract_data["site"]:
+                    differentiators.append(str(contract_data["site"]))
                 
-                contract_data['additional_data'] = json.dumps(additional_data, default=json_serial)
-            
-            # 5. Verificar si el contrato ya existe
-            contract_number = contract_data.get('contract_number')
-            existing_contract = None
-            
-            if contract_number:
-                existing_contract = db.query(Contract).filter(Contract.contract_number == contract_number).first()
-            
-            # Si no se encuentra por número de contrato, buscar por número SAP
-            sap_number = contract_data.get('sap_contract_number')
-            if not existing_contract and sap_number:
-                existing_contract = db.query(Contract).filter(Contract.sap_contract_number == sap_number).first()
-            
-            # 6. Verificar que tenga los campos obligatorios
-            required_fields = ['contract_number', 'description', 'supplier']
-            missing_fields = [field for field in required_fields if field not in contract_data or not contract_data[field]]
-            
-            if missing_fields:
-                debug_info = {
-                    'Número de Contrato SAP': row.get('Contrato SAP Vigente (Antiguo)', "No disponible"),
-                    'PROVEEDOR ACTUAL o PRINCIPAL': row.get('PROVEEDOR ACTUAL o PRINCIPAL', "No disponible"),
-                    'Bien / Servicio': row.get('Bien / Servicio', "No disponible")
-                }
-                print(f"Advertencia: Faltan campos requeridos: {missing_fields}, datos disponibles: {debug_info}, fila: {_}")
-                continue
-            
-            # 7. Crear o actualizar contrato
-            try:
-                if existing_contract:
-                    # Actualizar contrato existente
-                    contract_data['updated_by'] = user_id
-                    contract_data['updated_at'] = datetime.utcnow()
-                    
-                    for field, value in contract_data.items():
-                        setattr(existing_contract, field, value)
-                    
-                    db.commit()
+                # Si encontramos diferenciadores, úsalos para crear un identificador más específico
+                if differentiators:
+                    # Usar un hash para no exceder la longitud del campo
+                    import hashlib
+                    diff_hash = hashlib.md5("-".join(differentiators).encode()).hexdigest()[:8]
+                    contract_identifier = f"{original_contract_number}-{diff_hash}"
                 else:
-                    # Crear nuevo contrato
-                    contract_data['created_by'] = user_id
-                    contract_data['updated_by'] = user_id
-                    
+                    # Si no hay diferenciadores específicos, usar contador simple
+                    suffix_count = processed_contracts[original_contract_number] + 1
+                    processed_contracts[original_contract_number] = suffix_count
+                    contract_identifier = f"{original_contract_number}-{suffix_count}"
+                
+                # Actualizar el número de contrato para esta fila
+                contract_data["contract_number"] = contract_identifier
+                print(f"Contrato duplicado encontrado. Original: {original_contract_number}, Nuevo: {contract_identifier}")
+            else:
+                # Registrar este contrato como procesado (inicializar contador)
+                processed_contracts[original_contract_number] = 1
+            
+            try:
+                # Crear nuevo contrato (siempre insertamos como nuevo, ya que hemos generado números únicos)
+                new_contract = Contract(**contract_data)
+                db.add(new_contract)
+                contracts_imported += 1
+                
+                # Commit periódico para evitar transacciones demasiado grandes
+                if contracts_imported % 100 == 0:
+                    db.commit()
+                    print(f"Procesados: {contracts_imported} contratos")
+            
+            except IntegrityError as integrity_error:
+                # Si aún hay un error de integridad, hacer rollback y continuar con un valor totalmente único
+                db.rollback()
+                print(f"Error de integridad: {integrity_error}")
+                
+                # Generar un número totalmente único y reintentar
+                unique_contract_number = f"UNIQUE-{str(uuid.uuid4())[:8]}-{idx}"
+                contract_data["contract_number"] = unique_contract_number
+                
+                try:
                     new_contract = Contract(**contract_data)
                     db.add(new_contract)
+                    contracts_imported += 1
                     db.commit()
+                    print(f"Reintento exitoso con número único: {unique_contract_number}")
+                except Exception as retry_error:
+                    db.rollback()
+                    print(f"Error crítico en reintento: {retry_error}")
+                    # Continuar con el siguiente contrato
+                    continue
                 
-                contracts_imported += 1
-            except Exception as e:
-                print(f"Error al guardar contrato: {e}")
+            except Exception as contract_error:
                 db.rollback()
+                print(f"Error al procesar contrato: {contract_error}")
+                print(f"Datos del contrato: {contract_data}")
+                # Continuar con el siguiente contrato
+                continue
+        
+        # Commit final
+        try:
+            db.commit()
+        except Exception as final_commit_error:
+            db.rollback()
+            print(f"Error en commit final: {final_commit_error}")
+            
+        print(f"Total: {contracts_imported} contratos procesados")
         
         return {
             "contracts_imported": contracts_imported
         }
     
     except Exception as e:
-        db.rollback()
+        try:
+            db.rollback()
+        except:
+            pass
+        print(f"Error general en importación: {e}")
         raise e
     
-def export_to_excel(db: Session, sheet_name="Sourcing Plan"):
+def export_to_excel(db: Session):
     """
-    Exporta datos de la base de datos a un archivo Excel en la hoja correcta
+    Exporta datos de la base de datos a un archivo Excel de manera simple y directa
     """
     try:
         # Obtener todos los contratos
         contracts = db.query(Contract).all()
         
-        # Crear un DataFrame
+        # Convertir contratos a diccionarios simples
         data = []
         for contract in contracts:
-            # Primero prepara los datos básicos del contrato
-            contract_data = {
-                # Información básica
-                'Número de Contrato': contract.contract_number,
-                'Descripción': contract.description,
-                'Proveedor': contract.supplier,
-                'Estado': contract.status,
-                'Fecha Inicio': contract.start_date,
-                'Fecha Fin': contract.end_date,
-                'Moneda': contract.currency,
-                'Monto Total': contract.total_amount,
-                'Monto Restante': contract.remaining_amount,
-                
-                # Datos SAP (A-J)
-                'Número de Contrato SAP': contract.sap_contract_number,
-                'Descripción SAP': contract.sap_description,
-                'Proveedor SAP': contract.sap_supplier,
-                'Fecha Inicio SAP': contract.sap_start_date,
-                'Fecha Fin SAP': contract.sap_end_date,
-                'Moneda SAP': contract.sap_currency,
-                'Monto Total SAP': contract.sap_total_amount,
-                'Monto Restante SAP': contract.sap_remaining_amount,
-                'Departamento SAP': contract.sap_department,
-                'Categoría SAP': contract.sap_category,
-                
-                # Datos llenados por analistas (K-S)
-                'Bien / Servicio': contract.good_service,
-                'Sitio': contract.site,
-                'Nombre Proceso': contract.process_name,
-                'Nombre de Área Supply': contract.supply_area_name,
-                'Tipo de Contrato': contract.contract_type,
-                'OPEX / CAPEX': contract.opex_capex,
-                'Analista de Contratos': contract.contract_analyst,
-                'Gerencia Usuaria': contract.user_management,
-                'Categoría (N1+N2)': contract.category_n1_n2,
-                
-                # Columna T - Calculada (Alerta Renovación)
-                'Alerta Renovación del Contrato': getattr(contract, 'renewal_alert', ''),
-                
-                # Campos U-Y
-                'Tipo de Contratación': contract.contracting_type,
-                'Budget (USD) Informado por Finanzas': contract.budget_usd,
-                'Código Interno Planificación (CMF)': contract.cmf_code,
-                'Fecha de Inicio del Proceso (Planificado)': contract.planned_process_start_date,
-                'Fecha de Fin "11.Finalizado (Contrato Firmado)"': contract.contract_signed_end_date,
-                
-                # Columna Z - Calculada (Alerta Inicio Proceso)
-                'Alerta Inicio Proceso': getattr(contract, 'process_start_alert', ''),
-                
-                # Campos AA-AU - Fechas de hitos internos
-                'Solped con Budget Aprobado': contract.solped_budget_approved_date,
-                'Comité de Estrategia': contract.strategy_committee_date,
-                'Salida a mercado': contract.market_release_date,
-                'Consultas': contract.queries_date,
-                'Recepción ofertas': contract.offers_reception_date,
-                'Evaluación técnica': contract.technical_evaluation_date,
-                'Evaluación económica': contract.economic_evaluation_date,
-                'Negociación': contract.negotiation_date,
-                'Comité SC': contract.sc_committee_date,
-                'Comité de sitio': contract.site_committee_date,
-                'Comité regional': contract.regional_committee_date,
-                'Comité global': contract.global_committee_date,
-                'Fecha de Adjudicación (Contrato firmado)': contract.contract_signed_date,
-                'Kickoff': contract.kickoff_date,
-                'Estatus Actual': contract.current_status,
-                'Comentario': contract.comment,
-                'Fecha Adjudicación Real': contract.real_award_date,
-                'Código Licitación': contract.tender_code,
-                'Monto Adjudicado': contract.awarded_amount,
-                'Número de Contrato en SAP': contract.sap_contract_number_new,
-                'Plazo del nuevo contrato (meses)': contract.new_contract_term_months,
-                
-                # Campos calculados automáticos (AV-AZ)
-                '% de Avance': getattr(contract, 'progress_percentage', 0),
-                'Duración SLA': getattr(contract, 'sla_duration', 0),
-                'Completitud general': getattr(contract, 'general_completeness', 0)
-            }
+            contract_dict = {}
+            for column in contract.__table__.columns:
+                # Incluir todos los campos excepto algunos específicos internos
+                if column.name not in ['id', 'created_at', 'updated_at']:
+                    value = getattr(contract, column.name)
+                    # Convertir fechas a formato string para evitar problemas
+                    if isinstance(value, (datetime, date)):
+                        value = value.isoformat() if value else None
+                    contract_dict[column.name] = value
             
             # Agregar datos adicionales si existen
             if contract.additional_data:
                 try:
-                    additional_data = json.loads(contract.additional_data)
-                    for key, value in additional_data.items():
-                        if key not in contract_data:
-                            contract_data[key] = value
+                    add_data = json.loads(contract.additional_data)
+                    if isinstance(add_data, dict):
+                        for key, value in add_data.items():
+                            contract_dict[f"add_{key}"] = value
                 except:
                     pass
-            
-            data.append(contract_data)
+                    
+            data.append(contract_dict)
         
-        # Crear DataFrame y exportar a Excel
+        # Crear DataFrame simple
         df = pd.DataFrame(data)
         
-        # Crear una copia backup en la carpeta backup
+        # Guardar en archivo temporal
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
         with pd.ExcelWriter(temp_file.name, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-            
-        # Backup
-        backup_dir = Path("./backups")
-        backup_dir.mkdir(exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = backup_dir / f"sourcing_plan_backup_{timestamp}.xlsx"
+            df.to_excel(writer, sheet_name="Sourcing Plan", index=False)
         
-        with pd.ExcelWriter(str(backup_path), engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-            
         return temp_file.name
-
     
     except Exception as e:
+        print(f"Error al exportar: {e}")
         raise e
