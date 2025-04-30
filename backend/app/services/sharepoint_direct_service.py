@@ -5,7 +5,7 @@ import os
 import tempfile
 import requests
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime, date, time
 from sqlalchemy.orm import Session
 from app.services.excel_service import import_from_excel, export_to_excel
 import pandas as pd
@@ -170,9 +170,16 @@ class SharePointDirectService:
         Sincroniza los datos desde la base de datos hacia el mismo Excel en SharePoint,
         preservando su estructura original
         """
+        temp_file = None
+        excel_path = None
+        
         try:
             # Paso 1: Descargar el Excel actual para preservar su estructura
             excel_path = self.download_excel()
+            
+            # CORRECCIÓN: Verificar que el archivo descargado exista
+            if not os.path.exists(excel_path):
+                raise Exception(f"No se pudo descargar el archivo Excel: {excel_path}")
             
             # Paso 2: Leer el Excel para obtener su estructura original
             original_df = pd.read_excel(excel_path)
@@ -321,6 +328,14 @@ class SharePointDirectService:
             # Paso 8: Crear el DataFrame actualizado con la misma estructura
             updated_df = pd.DataFrame(updated_rows, columns=original_df.columns)
             
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+            temp_file.close()  # Cerrar inmediatamente
+            try:
+                with pd.ExcelWriter(temp_file.name, engine='openpyxl') as writer:
+                    updated_df.to_excel(writer, index=False)
+            except Exception as e:
+                raise Exception(f"Error al guardar archivo temporal: {str(e)}")
+
             # Paso 9: Guardar el DataFrame actualizado en el mismo archivo
             updated_df.to_excel(excel_path, index=False)
             
@@ -328,18 +343,40 @@ class SharePointDirectService:
             upload_result = self.upload_excel(excel_path)
             
             # Limpiar el archivo temporal
-            try:
-                os.remove(excel_path)
-            except:
-                print(f"No se pudo eliminar el archivo temporal: {excel_path}")
+            files_to_clean = [excel_path, temp_file.name]
+            for file_path in files_to_clean:
+                if file_path and os.path.exists(file_path):
+                    try:
+                        # Intento mejorado de eliminación con reintentos
+                        max_retries = 3
+                        for i in range(max_retries):
+                            try:
+                                time.sleep(0.5 * (i + 1))  # Espera incremental
+                                os.unlink(file_path)
+                                break
+                            except PermissionError:
+                                if i == max_retries - 1:
+                                    print(f"Error persistente al eliminar {file_path}")
+                                    raise
+                                continue
+                    except Exception as e:
+                        print(f"Advertencia: No se pudo eliminar {file_path}: {str(e)}")
             
             return {
                 "message": "Sincronización exitosa con SharePoint. Excel actualizado manteniendo su estructura original.",
-                "file_path": str(excel_path) if os.path.exists(excel_path) else None
+                "file_path": str(upload_result.get('file_path')) if isinstance(upload_result, dict) and 'file_path' in upload_result else None
             }
         
         except Exception as e:
             print(f"Error en sincronización hacia SharePoint: {str(e)}")
+            # Limpieza mejorada de archivos temporales
+            files_to_clean = [excel_path, temp_file.name if temp_file else None]
+            for file_path in files_to_clean:
+                if file_path and os.path.exists(file_path):
+                    try:
+                        os.unlink(file_path)
+                    except Exception as cleanup_error:
+                        print(f"Error al limpiar archivo temporal {file_path}: {str(cleanup_error)}")
             raise Exception(f"Error en sincronización hacia SharePoint: {str(e)}")
 
 # Para uso de prueba y desarrollo
